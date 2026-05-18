@@ -1243,31 +1243,35 @@ function MarkerScanner({ parts, onDecoded, onCancel }){
         const candidates = decoded.candidates || [];
 
         // ── DEBUG readout ────────────────────────────────────────────────────
-        if(decoded.best){
-          const d = decoded.best.decoded;
-          const thr = d.lineThreshold?.toFixed(1) ?? "?";
-          const edg = d.edgeAvg?.toFixed(1) ?? "?";
-          const bg  = d.bgAvg?.toFixed(1) ?? "?";
-          let dbg = `edge=${edg}  bg=${bg}  thr=${thr}\n`;
+        if(decoded && decoded.best){
+          const d = decoded.best.decoded || {};
+          const thr = (d.lineThreshold !== undefined) ? d.lineThreshold.toFixed(1) : "?";
+          const edg = (d.edgeAvg !== undefined) ? d.edgeAvg.toFixed(1) : "?";
+          const bg  = (d.bgAvg !== undefined) ? d.bgAvg.toFixed(1) : "?";
+          let dbg = "edge=" + edg + "  bg=" + bg + "  thr=" + thr + "\n";
           const tNames = ["CTR","RGT","LFT"];
           for(let t=0;t<3;t++){
-            const samps = d.lineSamples?.[t] ?? [];
-            const present = samps.filter(s=>s.present).map(s=>s.line+"("+s.mean.toFixed(0)+")");
-            const absent  = samps.filter(s=>!s.present).map(s=>s.line+"("+s.mean.toFixed(0)+")");
-            dbg += `\n${tNames[t]} state=${d.states?.[t]}\n`;
-            dbg += `  PRESENT: ${present.join(" ")||"none"}\n`;
-            dbg += `  absent:  ${absent.slice(0,6).join(" ")}...\n`;
+            const samps = (d.lineSamples && d.lineSamples[t]) ? d.lineSamples[t] : [];
+            const present = samps.filter(function(s){return s.present;}).map(function(s){return s.line+"("+s.mean.toFixed(0)+")";});
+            const absent  = samps.filter(function(s){return !s.present;}).map(function(s){return s.line+"("+s.mean.toFixed(0)+")";});
+            const stateVal = (d.states && d.states[t] !== undefined) ? d.states[t] : "?";
+            dbg += "\n" + tNames[t] + " state=" + stateVal + "\n";
+            dbg += "  PRESENT: " + (present.join(" ") || "none") + "\n";
+            dbg += "  absent:  " + absent.slice(0,6).join(" ") + "...\n";
           }
           console.log("=== SCANNER DEBUG ===\n" + dbg);
-          // Also draw on freeze-frame
+          // Draw on freeze-frame
           ctx.save();
-          ctx.fillStyle="rgba(0,0,0,0.8)";
-          ctx.fillRect(0,0,w,Math.min(h,140));
-          ctx.fillStyle="#0f0"; ctx.font="bold 13px monospace";
-          const lines = dbg.split("\n");
-          lines.forEach((l,i)=>ctx.fillText(l, 6, 16+i*16));
+          ctx.fillStyle = "rgba(0,0,0,0.85)";
+          ctx.fillRect(0, 0, w, 200);
+          ctx.fillStyle = "#0f0";
+          ctx.font = "bold 14px monospace";
+          const dbgLines = dbg.split("\n");
+          for(let i = 0; i < dbgLines.length; i++){
+            ctx.fillText(dbgLines[i], 8, 18 + i*16);
+          }
           ctx.restore();
-          setPreviewUrl(canvas.toDataURL("image/jpeg",0.85));
+          setPreviewUrl(canvas.toDataURL("image/jpeg", 0.85));
         }
         // ── END DEBUG ────────────────────────────────────────────────────────
 
