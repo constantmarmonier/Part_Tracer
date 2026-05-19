@@ -417,13 +417,17 @@ function trianglePoints(tri){
 }
 
 // MarkerSVG — vector replacement for QR. Same-thickness lines; pure vector.
-// strokePx (optional): rendered stroke is EXACTLY this many DEVICE pixels via
-// vectorEffect="non-scaling-stroke". Defaults to 1 device pixel.
-function MarkerSVG({ code, size=80, strokePx=1, color="#18181B" }){
+// strokePx (optional): when provided, computes a stroke-width such that the
+// rendered strokes are *approximately* this many CSS pixels at the current size.
+// Otherwise falls back to strokeRatio × viewBox-width (relative to vector units).
+function MarkerSVG({ code, size=80, strokeRatio=0.045, strokePx=null, color="#18181B" }){
   if(!code) return null;
   const states = markerCodeToStates(code);
   if(!states) return null;
   const VB_X=-16.5, VB_Y=-7.2, VB_W=33, VB_H=14.4;
+  const sw = (strokePx !== null && strokePx !== undefined)
+    ? strokePx * (VB_W / size)        // px → viewBox units at the rendered size
+    : VB_W * strokeRatio;
 
   const triPaths = SMC_TRIANGLES.map((tri,i)=>{
     const pts = trianglePoints(tri);
@@ -444,9 +448,7 @@ function MarkerSVG({ code, size=80, strokePx=1, color="#18181B" }){
       width={size} height={size * VB_H / VB_W}
       xmlns="http://www.w3.org/2000/svg"
       style={{display:"block"}}>
-      <g fill="none" stroke={color} strokeWidth={strokePx}
-         vectorEffect="non-scaling-stroke"
-         strokeLinecap="round" strokeLinejoin="round">
+      <g fill="none" stroke={color} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">
         {/* Baseline-extension segments */}
         {SMC_BASELINE.map(([a,b],i)=>(
           <line key={"bl"+i} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} />
@@ -465,981 +467,61 @@ function MarkerSVG({ code, size=80, strokePx=1, color="#18181B" }){
   );
 }
 
-// Build a downloadable PNG from a marker code and trigger browser download.
-// Transparent background, 1-pixel black lines, rendered at 1200px wide.
-function downloadMarkerPNG(code, partLabel){
+// Build a downloadable SVG string from a marker code and trigger browser download.
+function downloadMarkerSVG(code, partLabel){
   if(!code) return;
   const states = markerCodeToStates(code);
   if(!states) return;
   const VB_X=-16.5, VB_Y=-7.2, VB_W=33, VB_H=14.4;
-
-  // Render resolution. Tall enough for detail, modest file size.
-  const W = 1200;
-  const H = Math.round(W * VB_H / VB_W);
-
-  const canvas = document.createElement("canvas");
-  canvas.width = W;
-  canvas.height = H;
-  const ctx = canvas.getContext("2d");
-  // No background fill — canvas starts transparent.
-  ctx.clearRect(0, 0, W, H);
-
-  // Map viewBox coords → canvas pixels.
-  const sx = W / VB_W;
-  const sy = H / VB_H;
-  const tx = (p) => (p[0] - VB_X) * sx;
-  const ty = (p) => (p[1] - VB_Y) * sy;
-
-  ctx.strokeStyle = "#000000";
-  ctx.lineWidth = 1; // 1 device pixel
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-
-  const drawLine = (p1, p2) => {
-    ctx.beginPath();
-    ctx.moveTo(tx(p1), ty(p1));
-    ctx.lineTo(tx(p2), ty(p2));
-    ctx.stroke();
-  };
-
-  // Baseline segments
-  for(const [a,b] of SMC_BASELINE){ drawLine(a, b); }
-  // Triangle outlines + interior code lines
-  SMC_TRIANGLES.forEach((tri, i) => {
-    drawLine(tri.A, tri.B);
-    drawLine(tri.B, tri.C);
-    drawLine(tri.C, tri.A);
+  const sw = VB_W * 0.045;
+  let body = "";
+  // baseline
+  for(const [a,b] of SMC_BASELINE){
+    body += `<line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}"/>`;
+  }
+  // triangles + interior lines
+  SMC_TRIANGLES.forEach((tri,i)=>{
+    body += `<path d="M ${tri.A[0]} ${tri.A[1]} L ${tri.B[0]} ${tri.B[1]} L ${tri.C[0]} ${tri.C[1]} Z"/>`;
     const pts = trianglePoints(tri);
     const subset = MARKER_SUBSETS[states[i]] || [];
     for(const idx of subset){
       const ln = MARKER_LINES[idx];
       const p1 = pts[ln[0].toUpperCase()];
       const p2 = pts[ln[1].toUpperCase()];
-      drawLine(p1, p2);
+      body += `<line x1="${p1[0]}" y1="${p1[1]}" x2="${p2[0]}" y2="${p2[1]}"/>`;
     }
   });
-
   const safeLabel = (partLabel||"part").replace(/[^a-zA-Z0-9_-]/g,"_");
-  canvas.toBlob((blob) => {
-    if(!blob) return;
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `marker-${code}-${safeLabel}.png`;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }, "image/png");
-}
-
-// Pre-generated DXF wrapper from ezdxf (AC1015 / AutoCAD 2000 format).
-// All required tables (VPORT, LTYPE, LAYER, STYLE, VIEW, UCS, APPID, DIMSTYLE,
-// BLOCK_RECORD), BLOCKS, and OBJECTS sections are included so strict readers
-// (AutoCAD, LibreCAD, QCAD, CAM software) accept the file without errors.
-// Entities are injected between PREFIX (ends at the ENTITIES header) and SUFFIX
-// (begins at the ENDSEC closing ENTITIES). The owner handle 17 is the
-// *Model_Space block record handle from the template — do not change.
-const DXF_TEMPLATE_PREFIX = "  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1015\n  9\n$ACADMAINTVER\n 70\n6\n  9\n$DWGCODEPAGE\n  3\nANSI_1252\n  9\n$INSBASE\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$EXTMIN\n 10\n1e+20\n 20\n1e+20\n 30\n1e+20\n  9\n$EXTMAX\n 10\n-1e+20\n 20\n-1e+20\n 30\n-1e+20\n  9\n$LIMMIN\n 10\n0.0\n 20\n0.0\n  9\n$LIMMAX\n 10\n420.0\n 20\n297.0\n  9\n$ORTHOMODE\n 70\n0\n  9\n$REGENMODE\n 70\n1\n  9\n$FILLMODE\n 70\n1\n  9\n$QTEXTMODE\n 70\n0\n  9\n$MIRRTEXT\n 70\n1\n  9\n$LTSCALE\n 40\n1.0\n  9\n$ATTMODE\n 70\n1\n  9\n$TEXTSIZE\n 40\n2.5\n  9\n$TRACEWID\n 40\n1.0\n  9\n$TEXTSTYLE\n  7\nStandard\n  9\n$CLAYER\n  8\n0\n  9\n$CELTYPE\n  6\nByLayer\n  9\n$CECOLOR\n 62\n256\n  9\n$CELTSCALE\n 40\n1.0\n  9\n$DISPSILH\n 70\n0\n  9\n$DIMSCALE\n 40\n1.0\n  9\n$DIMASZ\n 40\n2.5\n  9\n$DIMEXO\n 40\n0.625\n  9\n$DIMDLI\n 40\n3.75\n  9\n$DIMRND\n 40\n0.0\n  9\n$DIMDLE\n 40\n0.0\n  9\n$DIMEXE\n 40\n1.25\n  9\n$DIMTP\n 40\n0.0\n  9\n$DIMTM\n 40\n0.0\n  9\n$DIMTXT\n 40\n2.5\n  9\n$DIMCEN\n 40\n2.5\n  9\n$DIMTSZ\n 40\n0.0\n  9\n$DIMTOL\n 70\n0\n  9\n$DIMLIM\n 70\n0\n  9\n$DIMTIH\n 70\n0\n  9\n$DIMTOH\n 70\n0\n  9\n$DIMSE1\n 70\n0\n  9\n$DIMSE2\n 70\n0\n  9\n$DIMTAD\n 70\n1\n  9\n$DIMZIN\n 70\n8\n  9\n$DIMBLK\n  1\n\n  9\n$DIMASO\n 70\n1\n  9\n$DIMSHO\n 70\n1\n  9\n$DIMPOST\n  1\n\n  9\n$DIMAPOST\n  1\n\n  9\n$DIMALT\n 70\n0\n  9\n$DIMALTD\n 70\n3\n  9\n$DIMALTF\n 40\n0.03937007874\n  9\n$DIMLFAC\n 40\n1.0\n  9\n$DIMTOFL\n 70\n1\n  9\n$DIMTVP\n 40\n0.0\n  9\n$DIMTIX\n 70\n0\n  9\n$DIMSOXD\n 70\n0\n  9\n$DIMSAH\n 70\n0\n  9\n$DIMBLK1\n  1\n\n  9\n$DIMBLK2\n  1\n\n  9\n$DIMSTYLE\n  2\nISO-25\n  9\n$DIMCLRD\n 70\n0\n  9\n$DIMCLRE\n 70\n0\n  9\n$DIMCLRT\n 70\n0\n  9\n$DIMTFAC\n 40\n1.0\n  9\n$DIMGAP\n 40\n0.625\n  9\n$DIMJUST\n 70\n0\n  9\n$DIMSD1\n 70\n0\n  9\n$DIMSD2\n 70\n0\n  9\n$DIMTOLJ\n 70\n0\n  9\n$DIMTZIN\n 70\n8\n  9\n$DIMALTZ\n 70\n0\n  9\n$DIMALTTZ\n 70\n0\n  9\n$DIMUPT\n 70\n0\n  9\n$DIMDEC\n 70\n2\n  9\n$DIMTDEC\n 70\n2\n  9\n$DIMALTU\n 70\n2\n  9\n$DIMALTTD\n 70\n3\n  9\n$DIMTXSTY\n  7\nStandard\n  9\n$DIMAUNIT\n 70\n0\n  9\n$DIMADEC\n 70\n0\n  9\n$DIMALTRND\n 40\n0.0\n  9\n$DIMAZIN\n 70\n0\n  9\n$DIMDSEP\n 70\n44\n  9\n$DIMATFIT\n 70\n3\n  9\n$DIMFRAC\n 70\n0\n  9\n$DIMLDRBLK\n  1\n\n  9\n$DIMLUNIT\n 70\n2\n  9\n$DIMLWD\n 70\n-2\n  9\n$DIMLWE\n 70\n-2\n  9\n$DIMTMOVE\n 70\n0\n  9\n$LUNITS\n 70\n2\n  9\n$LUPREC\n 70\n4\n  9\n$SKETCHINC\n 40\n1.0\n  9\n$FILLETRAD\n 40\n10.0\n  9\n$AUNITS\n 70\n0\n  9\n$AUPREC\n 70\n2\n  9\n$MENU\n  1\n.\n  9\n$ELEVATION\n 40\n0.0\n  9\n$PELEVATION\n 40\n0.0\n  9\n$THICKNESS\n 40\n0.0\n  9\n$LIMCHECK\n 70\n0\n  9\n$CHAMFERA\n 40\n0.0\n  9\n$CHAMFERB\n 40\n0.0\n  9\n$CHAMFERC\n 40\n0.0\n  9\n$CHAMFERD\n 40\n0.0\n  9\n$SKPOLY\n 70\n0\n  9\n$TDCREATE\n 40\n2461179.4918981483\n  9\n$TDUCREATE\n 40\n2458532.153996898\n  9\n$TDUPDATE\n 40\n2461179.4918981483\n  9\n$TDUUPDATE\n 40\n2458532.1544311\n  9\n$TDINDWG\n 40\n0.0\n  9\n$TDUSRTIMER\n 40\n0.0\n  9\n$USRTIMER\n 70\n1\n  9\n$ANGBASE\n 50\n0.0\n  9\n$ANGDIR\n 70\n0\n  9\n$PDMODE\n 70\n0\n  9\n$PDSIZE\n 40\n0.0\n  9\n$PLINEWID\n 40\n0.0\n  9\n$SPLFRAME\n 70\n0\n  9\n$SPLINETYPE\n 70\n6\n  9\n$SPLINESEGS\n 70\n8\n  9\n$HANDSEED\n  5\n32\n  9\n$SURFTAB1\n 70\n6\n  9\n$SURFTAB2\n 70\n6\n  9\n$SURFTYPE\n 70\n6\n  9\n$SURFU\n 70\n6\n  9\n$SURFV\n 70\n6\n  9\n$UCSBASE\n  2\n\n  9\n$UCSNAME\n  2\n\n  9\n$UCSORG\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$UCSXDIR\n 10\n1.0\n 20\n0.0\n 30\n0.0\n  9\n$UCSYDIR\n 10\n0.0\n 20\n1.0\n 30\n0.0\n  9\n$UCSORTHOREF\n  2\n\n  9\n$UCSORTHOVIEW\n 70\n0\n  9\n$UCSORGTOP\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$UCSORGBOTTOM\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$UCSORGLEFT\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$UCSORGRIGHT\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$UCSORGFRONT\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$UCSORGBACK\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$PUCSBASE\n  2\n\n  9\n$PUCSNAME\n  2\n\n  9\n$PUCSORG\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$PUCSXDIR\n 10\n1.0\n 20\n0.0\n 30\n0.0\n  9\n$PUCSYDIR\n 10\n0.0\n 20\n1.0\n 30\n0.0\n  9\n$PUCSORTHOREF\n  2\n\n  9\n$PUCSORTHOVIEW\n 70\n0\n  9\n$PUCSORGTOP\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$PUCSORGBOTTOM\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$PUCSORGLEFT\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$PUCSORGRIGHT\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$PUCSORGFRONT\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$PUCSORGBACK\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$USERI1\n 70\n0\n  9\n$USERI2\n 70\n0\n  9\n$USERI3\n 70\n0\n  9\n$USERI4\n 70\n0\n  9\n$USERI5\n 70\n0\n  9\n$USERR1\n 40\n0.0\n  9\n$USERR2\n 40\n0.0\n  9\n$USERR3\n 40\n0.0\n  9\n$USERR4\n 40\n0.0\n  9\n$USERR5\n 40\n0.0\n  9\n$WORLDVIEW\n 70\n1\n  9\n$SHADEDGE\n 70\n3\n  9\n$SHADEDIF\n 70\n70\n  9\n$TILEMODE\n 70\n1\n  9\n$MAXACTVP\n 70\n64\n  9\n$PINSBASE\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  9\n$PLIMCHECK\n 70\n0\n  9\n$PEXTMIN\n 10\n1e+20\n 20\n1e+20\n 30\n1e+20\n  9\n$PEXTMAX\n 10\n-1e+20\n 20\n-1e+20\n 30\n-1e+20\n  9\n$PLIMMIN\n 10\n0.0\n 20\n0.0\n  9\n$PLIMMAX\n 10\n420.0\n 20\n297.0\n  9\n$UNITMODE\n 70\n0\n  9\n$VISRETAIN\n 70\n1\n  9\n$PLINEGEN\n 70\n0\n  9\n$PSLTSCALE\n 70\n1\n  9\n$TREEDEPTH\n 70\n3020\n  9\n$CMLSTYLE\n  2\nStandard\n  9\n$CMLJUST\n 70\n0\n  9\n$CMLSCALE\n 40\n20.0\n  9\n$PROXYGRAPHICS\n 70\n1\n  9\n$MEASUREMENT\n 70\n1\n  9\n$CELWEIGHT\n370\n-1\n  9\n$ENDCAPS\n280\n0\n  9\n$JOINSTYLE\n280\n0\n  9\n$LWDISPLAY\n290\n0\n  9\n$INSUNITS\n 70\n4\n  9\n$HYPERLINKBASE\n  1\n\n  9\n$STYLESHEET\n  1\n\n  9\n$XEDIT\n290\n1\n  9\n$CEPSNTYPE\n380\n0\n  9\n$PSTYLEMODE\n290\n1\n  9\n$FINGERPRINTGUID\n  2\n{B4FDB23B-2268-422D-85B6-982E2B7DB75A}\n  9\n$VERSIONGUID\n  2\n{3A993448-514F-40FE-B3B8-BCD46BE3BA71}\n  9\n$EXTNAMES\n290\n1\n  9\n$PSVPSCALE\n 40\n0.0\n  9\n$OLESTARTUP\n290\n0\n  0\nENDSEC\n  0\nSECTION\n  2\nCLASSES\n  0\nCLASS\n  1\nACDBDICTIONARYWDFLT\n  2\nAcDbDictionaryWithDefault\n  3\nObjectDBX Classes\n 90\n0\n280\n0\n281\n0\n  0\nCLASS\n  1\nSUN\n  2\nAcDbSun\n  3\nSCENEOE\n 90\n1153\n280\n0\n281\n0\n  0\nCLASS\n  1\nVISUALSTYLE\n  2\nAcDbVisualStyle\n  3\nObjectDBX Classes\n 90\n4095\n280\n0\n281\n0\n  0\nCLASS\n  1\nMATERIAL\n  2\nAcDbMaterial\n  3\nObjectDBX Classes\n 90\n1153\n280\n0\n281\n0\n  0\nCLASS\n  1\nSCALE\n  2\nAcDbScale\n  3\nObjectDBX Classes\n 90\n1153\n280\n0\n281\n0\n  0\nCLASS\n  1\nTABLESTYLE\n  2\nAcDbTableStyle\n  3\nObjectDBX Classes\n 90\n4095\n280\n0\n281\n0\n  0\nCLASS\n  1\nMLEADERSTYLE\n  2\nAcDbMLeaderStyle\n  3\nACDB_MLEADERSTYLE_CLASS\n 90\n4095\n280\n0\n281\n0\n  0\nCLASS\n  1\nDICTIONARYVAR\n  2\nAcDbDictionaryVar\n  3\nObjectDBX Classes\n 90\n0\n280\n0\n281\n0\n  0\nCLASS\n  1\nCELLSTYLEMAP\n  2\nAcDbCellStyleMap\n  3\nObjectDBX Classes\n 90\n1152\n280\n0\n281\n0\n  0\nCLASS\n  1\nMENTALRAYRENDERSETTINGS\n  2\nAcDbMentalRayRenderSettings\n  3\nSCENEOE\n 90\n1024\n280\n0\n281\n0\n  0\nCLASS\n  1\nACDBDETAILVIEWSTYLE\n  2\nAcDbDetailViewStyle\n  3\nObjectDBX Classes\n 90\n1025\n280\n0\n281\n0\n  0\nCLASS\n  1\nACDBSECTIONVIEWSTYLE\n  2\nAcDbSectionViewStyle\n  3\nObjectDBX Classes\n 90\n1025\n280\n0\n281\n0\n  0\nCLASS\n  1\nRASTERVARIABLES\n  2\nAcDbRasterVariables\n  3\nISM\n 90\n0\n280\n0\n281\n0\n  0\nCLASS\n  1\nACDBPLACEHOLDER\n  2\nAcDbPlaceHolder\n  3\nObjectDBX Classes\n 90\n0\n280\n0\n281\n0\n  0\nCLASS\n  1\nLAYOUT\n  2\nAcDbLayout\n  3\nObjectDBX Classes\n 90\n0\n280\n0\n281\n0\n  0\nENDSEC\n  0\nSECTION\n  2\nTABLES\n  0\nTABLE\n  2\nVPORT\n  5\n8\n330\n0\n100\nAcDbSymbolTable\n 70\n1\n  0\nVPORT\n  5\n23\n330\n8\n100\nAcDbSymbolTableRecord\n100\nAcDbViewportTableRecord\n  2\n*Active\n 70\n0\n 10\n0.0\n 20\n0.0\n 11\n1.0\n 21\n1.0\n 12\n0.0\n 22\n0.0\n 13\n0.0\n 23\n0.0\n 14\n0.5\n 24\n0.5\n 15\n0.5\n 25\n0.5\n 16\n0.0\n 26\n0.0\n 36\n1.0\n 17\n0.0\n 27\n0.0\n 37\n0.0\n 40\n1000.0\n 41\n1.34\n 42\n50.0\n 43\n0.0\n 44\n0.0\n 50\n0.0\n 51\n0.0\n 71\n0\n 72\n1000\n 73\n1\n 74\n3\n 75\n0\n 76\n0\n 77\n0\n 78\n0\n281\n0\n 65\n0\n146\n0.0\n  0\nENDTAB\n  0\nTABLE\n  2\nLTYPE\n  5\n2\n330\n0\n100\nAcDbSymbolTable\n 70\n3\n  0\nLTYPE\n  5\n24\n330\n2\n100\nAcDbSymbolTableRecord\n100\nAcDbLinetypeTableRecord\n  2\nByBlock\n 70\n0\n  3\n\n 72\n65\n 73\n0\n 40\n0.0\n  0\nLTYPE\n  5\n25\n330\n2\n100\nAcDbSymbolTableRecord\n100\nAcDbLinetypeTableRecord\n  2\nByLayer\n 70\n0\n  3\n\n 72\n65\n 73\n0\n 40\n0.0\n  0\nLTYPE\n  5\n26\n330\n2\n100\nAcDbSymbolTableRecord\n100\nAcDbLinetypeTableRecord\n  2\nContinuous\n 70\n0\n  3\n\n 72\n65\n 73\n0\n 40\n0.0\n  0\nENDTAB\n  0\nTABLE\n  2\nLAYER\n  5\n1\n330\n0\n100\nAcDbSymbolTable\n 70\n2\n  0\nLAYER\n  5\n27\n330\n1\n100\nAcDbSymbolTableRecord\n100\nAcDbLayerTableRecord\n  2\n0\n 70\n0\n 62\n7\n  6\nContinuous\n370\n-3\n390\n13\n  0\nLAYER\n  5\n28\n330\n1\n100\nAcDbSymbolTableRecord\n100\nAcDbLayerTableRecord\n  2\nDefpoints\n 70\n0\n 62\n7\n  6\nContinuous\n290\n0\n370\n-3\n390\n13\n  0\nENDTAB\n  0\nTABLE\n  2\nSTYLE\n  5\n5\n330\n0\n100\nAcDbSymbolTable\n 70\n1\n  0\nSTYLE\n  5\n29\n330\n5\n100\nAcDbSymbolTableRecord\n100\nAcDbTextStyleTableRecord\n  2\nStandard\n 70\n0\n 40\n0.0\n 41\n1.0\n 50\n0.0\n 71\n0\n 42\n2.5\n  3\ntxt\n  4\n\n  0\nENDTAB\n  0\nTABLE\n  2\nVIEW\n  5\n7\n330\n0\n100\nAcDbSymbolTable\n 70\n0\n  0\nENDTAB\n  0\nTABLE\n  2\nUCS\n  5\n6\n330\n0\n100\nAcDbSymbolTable\n 70\n0\n  0\nENDTAB\n  0\nTABLE\n  2\nAPPID\n  5\n3\n330\n0\n100\nAcDbSymbolTable\n 70\n3\n  0\nAPPID\n  5\n2A\n330\n3\n100\nAcDbSymbolTableRecord\n100\nAcDbRegAppTableRecord\n  2\nACAD\n 70\n0\n  0\nAPPID\n  5\n2F\n330\n3\n100\nAcDbSymbolTableRecord\n100\nAcDbRegAppTableRecord\n  2\nHATCHBACKGROUNDCOLOR\n 70\n0\n  0\nAPPID\n  5\n30\n330\n3\n100\nAcDbSymbolTableRecord\n100\nAcDbRegAppTableRecord\n  2\nEZDXF\n 70\n0\n  0\nENDTAB\n  0\nTABLE\n  2\nDIMSTYLE\n  5\n4\n330\n0\n100\nAcDbSymbolTable\n 70\n1\n100\nAcDbDimStyleTable\n  0\nDIMSTYLE\n105\n2B\n330\n4\n100\nAcDbSymbolTableRecord\n100\nAcDbDimStyleTableRecord\n  2\nStandard\n 70\n0\n  3\n\n  4\n\n 40\n1.0\n 41\n2.5\n 42\n0.625\n 43\n3.75\n 44\n1.25\n 45\n0.0\n 46\n0.0\n 47\n0.0\n 48\n0.0\n140\n2.5\n141\n2.5\n142\n0.0\n143\n0.03937007874\n144\n1.0\n145\n0.0\n146\n1.0\n147\n0.625\n148\n0.0\n 71\n0\n 72\n0\n 73\n0\n 74\n0\n 75\n0\n 76\n0\n 77\n1\n 78\n8\n 79\n3\n170\n0\n171\n3\n172\n1\n173\n0\n174\n0\n175\n0\n176\n0\n177\n0\n178\n0\n179\n2\n271\n2\n272\n2\n273\n2\n274\n3\n275\n0\n276\n0\n277\n2\n278\n44\n279\n0\n280\n0\n281\n0\n282\n0\n283\n0\n284\n8\n285\n0\n286\n0\n288\n0\n289\n3\n371\n-2\n372\n-2\n  0\nENDTAB\n  0\nTABLE\n  2\nBLOCK_RECORD\n  5\n9\n330\n0\n100\nAcDbSymbolTable\n 70\n2\n  0\nBLOCK_RECORD\n  5\n17\n330\n9\n100\nAcDbSymbolTableRecord\n100\nAcDbBlockTableRecord\n  2\n*Model_Space\n340\n1A\n  0\nBLOCK_RECORD\n  5\n1B\n330\n9\n100\nAcDbSymbolTableRecord\n100\nAcDbBlockTableRecord\n  2\n*Paper_Space\n340\n1E\n  0\nENDTAB\n  0\nENDSEC\n  0\nSECTION\n  2\nBLOCKS\n  0\nBLOCK\n  5\n18\n330\n17\n100\nAcDbEntity\n  8\n0\n100\nAcDbBlockBegin\n  2\n*Model_Space\n 70\n0\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  3\n*Model_Space\n  1\n\n  0\nENDBLK\n  5\n19\n330\n17\n100\nAcDbEntity\n  8\n0\n100\nAcDbBlockEnd\n  0\nBLOCK\n  5\n1C\n330\n1B\n100\nAcDbEntity\n  8\n0\n100\nAcDbBlockBegin\n  2\n*Paper_Space\n 70\n0\n 10\n0.0\n 20\n0.0\n 30\n0.0\n  3\n*Paper_Space\n  1\n\n  0\nENDBLK\n  5\n1D\n330\n1B\n100\nAcDbEntity\n  8\n0\n100\nAcDbBlockEnd\n  0\nENDSEC\n  0\nSECTION\n  2\nENTITIES\n";
-const DXF_TEMPLATE_SUFFIX = "  0\nENDSEC\n  0\nSECTION\n  2\nOBJECTS\n  0\nDICTIONARY\n  5\nA\n330\n0\n100\nAcDbDictionary\n281\n1\n  3\nACAD_COLOR\n350\nB\n  3\nACAD_GROUP\n350\nC\n  3\nACAD_LAYOUT\n350\nD\n  3\nACAD_MATERIAL\n350\nE\n  3\nACAD_MLEADERSTYLE\n350\nF\n  3\nACAD_MLINESTYLE\n350\n10\n  3\nACAD_PLOTSETTINGS\n350\n11\n  3\nACAD_PLOTSTYLENAME\n350\n12\n  3\nACAD_SCALELIST\n350\n14\n  3\nACAD_TABLESTYLE\n350\n15\n  3\nACAD_VISUALSTYLE\n350\n16\n  3\nEZDXF_META\n350\n2D\n  0\nDICTIONARY\n  5\nB\n330\nA\n100\nAcDbDictionary\n281\n1\n  0\nDICTIONARY\n  5\nC\n330\nA\n100\nAcDbDictionary\n281\n1\n  0\nDICTIONARY\n  5\nD\n330\nA\n100\nAcDbDictionary\n281\n1\n  3\nModel\n350\n1A\n  3\nLayout1\n350\n1E\n  0\nDICTIONARY\n  5\nE\n330\nA\n100\nAcDbDictionary\n281\n1\n  3\nByBlock\n350\n1F\n  3\nByLayer\n350\n20\n  3\nGlobal\n350\n21\n  0\nDICTIONARY\n  5\nF\n330\nA\n100\nAcDbDictionary\n281\n1\n  3\nStandard\n350\n2C\n  0\nDICTIONARY\n  5\n10\n330\nA\n100\nAcDbDictionary\n281\n1\n  3\nStandard\n350\n22\n  0\nDICTIONARY\n  5\n11\n330\nA\n100\nAcDbDictionary\n281\n1\n  0\nACDBDICTIONARYWDFLT\n  5\n12\n330\nA\n100\nAcDbDictionary\n281\n1\n  3\nNormal\n350\n13\n100\nAcDbDictionaryWithDefault\n340\n13\n  0\nACDBPLACEHOLDER\n  5\n13\n330\n12\n  0\nDICTIONARY\n  5\n14\n330\nA\n100\nAcDbDictionary\n281\n1\n  0\nDICTIONARY\n  5\n15\n330\nA\n100\nAcDbDictionary\n281\n1\n  0\nDICTIONARY\n  5\n16\n330\nA\n100\nAcDbDictionary\n281\n1\n  0\nLAYOUT\n  5\n1A\n330\nD\n100\nAcDbPlotSettings\n  1\n\n  4\nA3\n  6\n\n 40\n7.5\n 41\n20.0\n 42\n7.5\n 43\n20.0\n 44\n420.0\n 45\n297.0\n 46\n0.0\n 47\n0.0\n 48\n0.0\n 49\n0.0\n140\n0.0\n141\n0.0\n142\n1.0\n143\n1.0\n 70\n1024\n 72\n1\n 73\n0\n 74\n5\n  7\n\n 75\n16\n 76\n0\n 77\n2\n 78\n300\n147\n1.0\n148\n0.0\n149\n0.0\n100\nAcDbLayout\n  1\nModel\n 70\n1\n 71\n0\n 10\n0.0\n 20\n0.0\n 11\n420.0\n 21\n297.0\n 12\n0.0\n 22\n0.0\n 32\n0.0\n 14\n1e+20\n 24\n1e+20\n 34\n1e+20\n 15\n-1e+20\n 25\n-1e+20\n 35\n-1e+20\n146\n0.0\n 13\n0.0\n 23\n0.0\n 33\n0.0\n 16\n1.0\n 26\n0.0\n 36\n0.0\n 17\n0.0\n 27\n1.0\n 37\n0.0\n 76\n1\n330\n17\n  0\nLAYOUT\n  5\n1E\n330\nD\n100\nAcDbPlotSettings\n  1\n\n  4\nA3\n  6\n\n 40\n7.5\n 41\n20.0\n 42\n7.5\n 43\n20.0\n 44\n420.0\n 45\n297.0\n 46\n0.0\n 47\n0.0\n 48\n0.0\n 49\n0.0\n140\n0.0\n141\n0.0\n142\n1.0\n143\n1.0\n 70\n0\n 72\n1\n 73\n0\n 74\n5\n  7\n\n 75\n16\n 76\n0\n 77\n2\n 78\n300\n147\n1.0\n148\n0.0\n149\n0.0\n100\nAcDbLayout\n  1\nLayout1\n 70\n1\n 71\n1\n 10\n0.0\n 20\n0.0\n 11\n420.0\n 21\n297.0\n 12\n0.0\n 22\n0.0\n 32\n0.0\n 14\n1e+20\n 24\n1e+20\n 34\n1e+20\n 15\n-1e+20\n 25\n-1e+20\n 35\n-1e+20\n146\n0.0\n 13\n0.0\n 23\n0.0\n 33\n0.0\n 16\n1.0\n 26\n0.0\n 36\n0.0\n 17\n0.0\n 27\n1.0\n 37\n0.0\n 76\n1\n330\n1B\n  0\nMATERIAL\n  5\n1F\n102\n{ACAD_REACTORS\n330\nE\n102\n}\n330\nE\n100\nAcDbMaterial\n  1\nByBlock\n  2\n\n 70\n0\n 40\n1.0\n 71\n1\n 41\n1.0\n 91\n-1023410177\n 42\n1.0\n 72\n1\n  3\n\n 73\n1\n 74\n1\n 75\n1\n 44\n0.5\n 73\n0\n 45\n1.0\n 46\n1.0\n 77\n1\n  4\n\n 78\n1\n 79\n1\n170\n1\n 48\n1.0\n171\n1\n  6\n\n172\n1\n173\n1\n174\n1\n140\n1.0\n141\n1.0\n175\n1\n  7\n\n176\n1\n177\n1\n178\n1\n143\n1.0\n179\n1\n  8\n\n270\n1\n271\n1\n272\n1\n145\n1.0\n146\n1.0\n273\n1\n  9\n\n274\n1\n275\n1\n276\n1\n 42\n1.0\n 72\n1\n  3\n\n 73\n1\n 74\n1\n 75\n1\n 94\n63\n  0\nMATERIAL\n  5\n20\n102\n{ACAD_REACTORS\n330\nE\n102\n}\n330\nE\n100\nAcDbMaterial\n  1\nByLayer\n  2\n\n 70\n0\n 40\n1.0\n 71\n1\n 41\n1.0\n 91\n-1023410177\n 42\n1.0\n 72\n1\n  3\n\n 73\n1\n 74\n1\n 75\n1\n 44\n0.5\n 73\n0\n 45\n1.0\n 46\n1.0\n 77\n1\n  4\n\n 78\n1\n 79\n1\n170\n1\n 48\n1.0\n171\n1\n  6\n\n172\n1\n173\n1\n174\n1\n140\n1.0\n141\n1.0\n175\n1\n  7\n\n176\n1\n177\n1\n178\n1\n143\n1.0\n179\n1\n  8\n\n270\n1\n271\n1\n272\n1\n145\n1.0\n146\n1.0\n273\n1\n  9\n\n274\n1\n275\n1\n276\n1\n 42\n1.0\n 72\n1\n  3\n\n 73\n1\n 74\n1\n 75\n1\n 94\n63\n  0\nMATERIAL\n  5\n21\n102\n{ACAD_REACTORS\n330\nE\n102\n}\n330\nE\n100\nAcDbMaterial\n  1\nGlobal\n  2\n\n 70\n0\n 40\n1.0\n 71\n1\n 41\n1.0\n 91\n-1023410177\n 42\n1.0\n 72\n1\n  3\n\n 73\n1\n 74\n1\n 75\n1\n 44\n0.5\n 73\n0\n 45\n1.0\n 46\n1.0\n 77\n1\n  4\n\n 78\n1\n 79\n1\n170\n1\n 48\n1.0\n171\n1\n  6\n\n172\n1\n173\n1\n174\n1\n140\n1.0\n141\n1.0\n175\n1\n  7\n\n176\n1\n177\n1\n178\n1\n143\n1.0\n179\n1\n  8\n\n270\n1\n271\n1\n272\n1\n145\n1.0\n146\n1.0\n273\n1\n  9\n\n274\n1\n275\n1\n276\n1\n 42\n1.0\n 72\n1\n  3\n\n 73\n1\n 74\n1\n 75\n1\n 94\n63\n  0\nMLINESTYLE\n  5\n22\n102\n{ACAD_REACTORS\n330\n10\n102\n}\n330\n10\n100\nAcDbMlineStyle\n  2\nStandard\n 70\n0\n  3\n\n 62\n256\n 51\n90.0\n 52\n90.0\n 71\n2\n 49\n0.5\n 62\n256\n  6\nBYLAYER\n 49\n-0.5\n 62\n256\n  6\nBYLAYER\n  0\nMLEADERSTYLE\n  5\n2C\n102\n{ACAD_REACTORS\n330\nF\n102\n}\n330\nF\n100\nAcDbMLeaderStyle\n179\n2\n170\n2\n171\n1\n172\n0\n 90\n2\n 40\n0.0\n 41\n0.0\n173\n1\n 91\n-1056964608\n 92\n-2\n290\n1\n 42\n2.0\n291\n1\n 43\n8.0\n  3\nStandard\n 44\n4.0\n300\n\n342\n29\n174\n1\n175\n1\n176\n0\n178\n1\n 93\n-1056964608\n 45\n4.0\n292\n0\n297\n0\n 46\n4.0\n 94\n-1056964608\n 47\n1.0\n 49\n1.0\n140\n1.0\n294\n1\n141\n0.0\n177\n0\n142\n1.0\n295\n0\n296\n0\n143\n3.75\n271\n0\n272\n9\n273\n9\n  0\nDICTIONARY\n  5\n2D\n330\nA\n100\nAcDbDictionary\n280\n1\n281\n1\n  3\nCREATED_BY_EZDXF\n350\n2E\n  3\nWRITTEN_BY_EZDXF\n350\n31\n  0\nDICTIONARYVAR\n  5\n2E\n330\n2D\n100\nDictionaryVariables\n280\n0\n  1\n1.4.4 @ 2026-05-18T11:48:20.722703+00:00\n  0\nDICTIONARYVAR\n  5\n31\n330\n2D\n100\nDictionaryVariables\n280\n0\n  1\n1.4.4 @ 2026-05-18T11:48:20.723669+00:00\n  0\nENDSEC\n  0\nEOF\n";
-const DXF_MODELSPACE_OWNER = "17";
-
-// Export the marker as a DXF file containing LINE entities (true vectors, no stroke width).
-// Y is negated so the orientation matches the on-screen marker (canvas/SVG are Y-down,
-// DXF is Y-up). Scaled to 200mm wide. Uses an ezdxf-generated AC1015 template so all
-// required tables and class markers are present.
-function downloadMarkerDXF(code, partLabel){
-  if(!code) return;
-  const states = markerCodeToStates(code);
-  if(!states) return;
-  const VB_W = 33;
-  const TARGET_MM = 200;
-  const scale = TARGET_MM / VB_W;
-  const fx = (p) => (p[0] * scale).toFixed(4);
-  const fy = (p) => (-p[1] * scale).toFixed(4); // flip Y for CAD orientation
-
-  // Collect all line segments [p1, p2]
-  const segs = [];
-  for(const [a, b] of SMC_BASELINE){
-    segs.push([a, b]);
-  }
-  SMC_TRIANGLES.forEach((tri, i) => {
-    segs.push([tri.A, tri.B]);
-    segs.push([tri.B, tri.C]);
-    segs.push([tri.C, tri.A]);
-    const pts = trianglePoints(tri);
-    const subset = MARKER_SUBSETS[states[i]] || [];
-    for(const idx of subset){
-      const ln = MARKER_LINES[idx];
-      const p1 = pts[ln[0].toUpperCase()];
-      const p2 = pts[ln[1].toUpperCase()];
-      segs.push([p1, p2]);
-    }
-  });
-
-  // Format each segment as a LINE entity matching ezdxf's preferred layout.
-  // Entity handles start at 0x100 — well clear of the template's 0x01..0x32 range.
-  let h = 0x100;
-  let entities = "";
-  for(const [p1, p2] of segs){
-    const handle = (h++).toString(16).toUpperCase();
-    entities +=
-      "  0\nLINE\n" +
-      "  5\n" + handle + "\n" +
-      "330\n" + DXF_MODELSPACE_OWNER + "\n" +
-      "100\nAcDbEntity\n" +
-      "  8\n0\n" +
-      "100\nAcDbLine\n" +
-      " 10\n" + fx(p1) + "\n 20\n" + fy(p1) + "\n 30\n0.0\n" +
-      " 11\n" + fx(p2) + "\n 21\n" + fy(p2) + "\n 31\n0.0\n";
-  }
-
-  const dxf = DXF_TEMPLATE_PREFIX + entities + DXF_TEMPLATE_SUFFIX;
-  const safeLabel = (partLabel||"part").replace(/[^a-zA-Z0-9_-]/g,"_");
-  const blob = new Blob([dxf], {type:"application/dxf"});
+  const svgContent =
+    `<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n` +
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${VB_X} ${VB_Y} ${VB_W} ${VB_H}" width="200mm" height="${(200*VB_H/VB_W).toFixed(2)}mm">\n` +
+    `  <title>SMC marker ${code} — ${partLabel||""}</title>\n` +
+    `  <g fill="none" stroke="#000000" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round">\n` +
+    `    ${body}\n` +
+    `  </g>\n` +
+    `</svg>\n`;
+  const blob = new Blob([svgContent], {type:"image/svg+xml"});
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `marker-${code}-${safeLabel}.dxf`;
+  a.download = `marker-${code}-${safeLabel}.svg`;
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
 
-// ============================================================================
-// ============================================================================
-// SMC Marker Scanner (CV pipeline) — tap-to-decode for camera capture.
-// grayscale → adaptive threshold → connected components → convex hull → 5
-// corners → match to canonical SMC pentagon → homography → sample 18 candidate
-// lines per triangle → 6-char Crockford code.
-// Returns multiple candidates — caller resolves mirror ambiguity via parts list.
-// ============================================================================
-
-// Canonical 5-corner hull (CCW from center-apex). Reference for homography fit.
-const CANONICAL_HULL = [
-  [0, -6.2394], [15, 0], [6.2254, 5.9342], [-6.2254, 5.9342], [-15, 0],
-];
-
-// Reverse lookup: sorted line-index tuple → state index
-const MARKER_SUBSET_LOOKUP = new Map();
-for (let i = 0; i < MARKER_SUBSETS.length; i++) {
-  MARKER_SUBSET_LOOKUP.set(MARKER_SUBSETS[i].slice().sort((a,b)=>a-b).join(","), i);
-}
-
-// Inverse of markerCodeToStates: [s1, s2, s3] → 6-char Crockford code
-function markerStatesToCode(states){
-  if (!states || states.length !== 3) return null;
-  let n = states[0] * MARKER_STATES_PER_TRI * MARKER_STATES_PER_TRI
-        + states[1] * MARKER_STATES_PER_TRI
-        + states[2];
-  let s = "";
-  for (let i = 0; i < 6; i++) { s = MARKER_ALPHABET[n & 31] + s; n = Math.floor(n / 32); }
-  return s;
-}
-// ============================================================================
-// SMC Marker Scanner — CV pipeline for tap-to-decode
-// ============================================================================
-// Pipeline: imageData → grayscale → adaptive threshold → connected components
-// → largest dark blob (the marker) → convex hull → 5 dominant corners → match
-// to canonical SMC pentagon → homography → sample 18 candidate line positions
-// per triangle → decode to 3 state indices → assemble 6-char Crockford code.
-
-// ----------------------------------------------------------------------------
-// ----------------------------------------------------------------------------
-// Image processing
-// ----------------------------------------------------------------------------
-function imageDataToGrayscale(data, w, h){
-  const gray = new Uint8ClampedArray(w * h);
-  for (let i = 0, j = 0; j < gray.length; i += 4, j++) {
-    gray[j] = (0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2]) | 0;
-  }
-  return gray;
-}
-
-// Adaptive threshold using integral image. windowSize is the local-mean window in pixels.
-// kFactor < 1: pixel is "dark" (foreground) if value < windowMean * kFactor.
-// Returns Uint8Array: 255 = foreground (dark in original), 0 = background (light).
-function adaptiveThreshold(gray, w, h, windowSize, kFactor){
-  const integral = new Float64Array(w * h);
-  for (let y = 0; y < h; y++) {
-    let rowSum = 0;
-    for (let x = 0; x < w; x++) {
-      rowSum += gray[y * w + x];
-      integral[y * w + x] = rowSum + (y > 0 ? integral[(y-1) * w + x] : 0);
-    }
-  }
-  const half = windowSize >> 1;
-  const result = new Uint8Array(w * h);
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const x1 = Math.max(0, x - half), y1 = Math.max(0, y - half);
-      const x2 = Math.min(w - 1, x + half), y2 = Math.min(h - 1, y + half);
-      const count = (x2 - x1 + 1) * (y2 - y1 + 1);
-      let sum = integral[y2 * w + x2];
-      if (x1 > 0) sum -= integral[y2 * w + (x1-1)];
-      if (y1 > 0) sum -= integral[(y1-1) * w + x2];
-      if (x1 > 0 && y1 > 0) sum += integral[(y1-1) * w + (x1-1)];
-      const mean = sum / count;
-      result[y * w + x] = gray[y * w + x] < mean * kFactor ? 255 : 0;
-    }
-  }
-  return result;
-}
-
-// Morphological dilation with 3x3 cross structuring element. Helps connect
-// thin strokes that got broken by thresholding (especially on engraved markers).
-function dilate(binary, w, h, iters){
-  let cur = binary;
-  for (let it = 0; it < iters; it++) {
-    const next = new Uint8Array(w * h);
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const idx = y * w + x;
-        if (cur[idx] === 255) { next[idx] = 255; continue; }
-        if (x > 0     && cur[idx-1] === 255) { next[idx] = 255; continue; }
-        if (x < w-1   && cur[idx+1] === 255) { next[idx] = 255; continue; }
-        if (y > 0     && cur[idx-w] === 255) { next[idx] = 255; continue; }
-        if (y < h-1   && cur[idx+w] === 255) { next[idx] = 255; continue; }
-      }
-    }
-    cur = next;
-  }
-  return cur;
-}
-
-// ----------------------------------------------------------------------------
-// Connected components (union-find, 8-connectivity)
-// ----------------------------------------------------------------------------
-function findConnectedComponents(binary, w, h, minArea){
-  const labels = new Int32Array(w * h);
-  const parent = [0];
-  const find = (x) => {
-    let r = x;
-    while (parent[r] !== r) r = parent[r];
-    while (parent[x] !== r) { const next = parent[x]; parent[x] = r; x = next; }
-    return r;
-  };
-  const union = (a, b) => {
-    const ra = find(a), rb = find(b);
-    if (ra !== rb) parent[Math.max(ra, rb)] = Math.min(ra, rb);
-  };
-  // First pass
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const idx = y * w + x;
-      if (binary[idx] === 0) continue;
-      // 8-connectivity: check N, NW, NE, W
-      const lN  = y > 0 ? labels[idx - w] : 0;
-      const lNW = (y > 0 && x > 0) ? labels[idx - w - 1] : 0;
-      const lNE = (y > 0 && x < w-1) ? labels[idx - w + 1] : 0;
-      const lW  = x > 0 ? labels[idx - 1] : 0;
-      const neighbors = [lN, lNW, lNE, lW].filter(l => l > 0);
-      if (neighbors.length === 0) {
-        const newLabel = parent.length;
-        parent.push(newLabel);
-        labels[idx] = newLabel;
-      } else {
-        const min = Math.min(...neighbors);
-        labels[idx] = min;
-        for (const n of neighbors) if (n !== min) union(min, n);
-      }
-    }
-  }
-  // Second pass: collect by root
-  const compMap = new Map();
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const idx = y * w + x;
-      if (labels[idx] === 0) continue;
-      const root = find(labels[idx]);
-      let c = compMap.get(root);
-      if (!c) {
-        c = { root, area: 0, minX: x, minY: y, maxX: x, maxY: y, sumX: 0, sumY: 0, pixels: [] };
-        compMap.set(root, c);
-      }
-      c.area++;
-      c.sumX += x; c.sumY += y;
-      if (x < c.minX) c.minX = x;
-      if (y < c.minY) c.minY = y;
-      if (x > c.maxX) c.maxX = x;
-      if (y > c.maxY) c.maxY = y;
-      c.pixels.push([x, y]);
-    }
-  }
-  const result = [];
-  for (const c of compMap.values()) {
-    if (c.area >= minArea) {
-      result.push({
-        area: c.area,
-        bbox: { minX: c.minX, minY: c.minY, maxX: c.maxX, maxY: c.maxY,
-                width: c.maxX - c.minX + 1, height: c.maxY - c.minY + 1 },
-        centroid: [c.sumX / c.area, c.sumY / c.area],
-        pixels: c.pixels,
-      });
-    }
-  }
-  return result;
-}
-
-// ----------------------------------------------------------------------------
-// Convex hull (Andrew's monotone chain, O(n log n))
-// ----------------------------------------------------------------------------
-function convexHull(points){
-  if (points.length < 3) return points.slice();
-  const pts = points.slice().sort((a,b) => a[0] - b[0] || a[1] - b[1]);
-  const cross = (O, A, B) => (A[0]-O[0])*(B[1]-O[1]) - (A[1]-O[1])*(B[0]-O[0]);
-  const lower = [];
-  for (const p of pts) {
-    while (lower.length >= 2 && cross(lower[lower.length-2], lower[lower.length-1], p) <= 0) lower.pop();
-    lower.push(p);
-  }
-  const upper = [];
-  for (let i = pts.length - 1; i >= 0; i--) {
-    const p = pts[i];
-    while (upper.length >= 2 && cross(upper[upper.length-2], upper[upper.length-1], p) <= 0) upper.pop();
-    upper.push(p);
-  }
-  lower.pop(); upper.pop();
-  return lower.concat(upper); // CCW order
-}
-
-// ----------------------------------------------------------------------------
-// Reduce a convex hull polygon to K dominant corners using Visvalingam-Whyatt:
-// iteratively remove the vertex whose triangle (with its two neighbors) has
-// the smallest area. Robust against collinear runs and stroke-edge noise on
-// the hull (e.g. the long baseline of a perfectly axis-aligned marker).
-// ----------------------------------------------------------------------------
-function selectKCorners(hull, K){
-  if (hull.length <= K) return hull.slice();
-  // Doubly-linked list of indices into hull
-  const n = hull.length;
-  const prev = new Int32Array(n);
-  const next = new Int32Array(n);
-  const alive = new Uint8Array(n);
-  for (let i = 0; i < n; i++) { prev[i] = (i - 1 + n) % n; next[i] = (i + 1) % n; alive[i] = 1; }
-  const area = (a, b, c) => Math.abs((b[0]-a[0])*(c[1]-a[1]) - (c[0]-a[0])*(b[1]-a[1])) * 0.5;
-  // Each round: scan all alive points, find smallest-area triangle, remove
-  let remaining = n;
-  while (remaining > K) {
-    let bestI = -1, bestA = Infinity;
-    for (let i = 0; i < n; i++) {
-      if (!alive[i]) continue;
-      const a = area(hull[prev[i]], hull[i], hull[next[i]]);
-      if (a < bestA) { bestA = a; bestI = i; }
-    }
-    if (bestI < 0) break;
-    alive[bestI] = 0;
-    next[prev[bestI]] = next[bestI];
-    prev[next[bestI]] = prev[bestI];
-    remaining--;
-  }
-  // Walk in CCW order starting from any alive
-  const result = [];
-  let start = -1;
-  for (let i = 0; i < n; i++) if (alive[i]) { start = i; break; }
-  if (start < 0) return [];
-  let cur = start;
-  do {
-    result.push(hull[cur]);
-    cur = next[cur];
-  } while (cur !== start);
-  return result;
-}
-
-// ----------------------------------------------------------------------------
-// Homography (DLT). Solves for 3x3 H mapping src → dst given 4+ point pairs.
-// Returns H as a flat 9-element array [h11,h12,h13,h21,h22,h23,h31,h32,h33].
-// Uses normal equations + Gaussian elimination. h33 fixed at 1 (8 unknowns).
-// ----------------------------------------------------------------------------
-function computeHomography(srcPoints, dstPoints){
-  const n = srcPoints.length;
-  if (n < 4 || n !== dstPoints.length) return null;
-  // Build A matrix (2n × 8) and b vector (2n)
-  const A = [], b = [];
-  for (let i = 0; i < n; i++) {
-    const [x, y] = srcPoints[i];
-    const [X, Y] = dstPoints[i];
-    A.push([x, y, 1, 0, 0, 0, -X*x, -X*y]);
-    b.push(X);
-    A.push([0, 0, 0, x, y, 1, -Y*x, -Y*y]);
-    b.push(Y);
-  }
-  // Normal equations: (A^T A) h = A^T b. Solve 8×8 system.
-  const AtA = Array.from({length:8}, () => new Float64Array(8));
-  const Atb = new Float64Array(8);
-  for (let i = 0; i < A.length; i++) {
-    for (let r = 0; r < 8; r++) {
-      Atb[r] += A[i][r] * b[i];
-      for (let c = 0; c < 8; c++) {
-        AtA[r][c] += A[i][r] * A[i][c];
-      }
-    }
-  }
-  // Gaussian elimination with partial pivoting
-  const M = AtA.map((row, i) => { const r = new Float64Array(9); r.set(row); r[8] = Atb[i]; return r; });
-  for (let i = 0; i < 8; i++) {
-    // Pivot
-    let maxRow = i;
-    for (let k = i+1; k < 8; k++) if (Math.abs(M[k][i]) > Math.abs(M[maxRow][i])) maxRow = k;
-    if (maxRow !== i) { const tmp = M[i]; M[i] = M[maxRow]; M[maxRow] = tmp; }
-    if (Math.abs(M[i][i]) < 1e-12) return null;
-    for (let k = i+1; k < 8; k++) {
-      const f = M[k][i] / M[i][i];
-      for (let j = i; j < 9; j++) M[k][j] -= f * M[i][j];
-    }
-  }
-  const h = new Float64Array(9);
-  for (let i = 7; i >= 0; i--) {
-    let s = M[i][8];
-    for (let j = i+1; j < 8; j++) s -= M[i][j] * h[j];
-    h[i] = s / M[i][i];
-  }
-  h[8] = 1;
-  return h;
-}
-
-function applyHomography(H, p){
-  const x = H[0]*p[0] + H[1]*p[1] + H[2];
-  const y = H[3]*p[0] + H[4]*p[1] + H[5];
-  const w = H[6]*p[0] + H[7]*p[1] + H[8];
-  return [x/w, y/w];
-}
-
-// ----------------------------------------------------------------------------
-// Sample brightness along a line in the grayscale image. Used to detect whether
-// a candidate interior line is drawn (dark) or absent (light).
-// Returns mean grayscale value (0=black, 255=white) along the line, sampling
-// inside the [start, end] range with a small inset to avoid stroke endpoints.
-// ----------------------------------------------------------------------------
-function sampleLineMean(gray, w, h, p1, p2, inset = 0.18, samples = 16){
-  let sum = 0, count = 0;
-  for (let s = 0; s < samples; s++) {
-    const t = inset + (1 - 2*inset) * (s + 0.5) / samples;
-    const x = p1[0] + t * (p2[0] - p1[0]);
-    const y = p1[1] + t * (p2[1] - p1[1]);
-    // Box of 3x3 around (x,y) — take the MINIMUM (darkest) value to find the
-    // line if it exists even when sampling is slightly off-axis.
-    const ix = Math.round(x), iy = Math.round(y);
-    let minV = 255;
-    for (let dy = -1; dy <= 1; dy++) {
-      for (let dx = -1; dx <= 1; dx++) {
-        const nx = ix + dx, ny = iy + dy;
-        if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
-        const v = gray[ny * w + nx];
-        if (v < minV) minV = v;
-      }
-    }
-    sum += minV;
-    count++;
-  }
-  return count > 0 ? sum / count : 255;
-}
-
-// ----------------------------------------------------------------------------
-// Match a detected 5-corner pentagon to the canonical SMC pentagon.
-// Tries all 5 rotations × 2 mirror states = 10 candidate alignments. For each,
-// fits a homography and scores it by reprojection residual + brightness-darkness
-// of the triangle outline edges (which should be DARK in the image).
-// ----------------------------------------------------------------------------
-function tryAlignments(detected5, gray, w, h){
-  if (detected5.length !== 5) return [];
-  const candidates = [];
-  for (let mirror = 0; mirror < 2; mirror++) {
-    for (let rot = 0; rot < 5; rot++) {
-      const src = [];
-      const dst = [];
-      for (let i = 0; i < 5; i++) {
-        const detectedIdx = (rot + i) % 5;
-        const canonIdx = mirror ? (5 - i) % 5 : i;
-        src.push(detected5[detectedIdx]);  // image coords
-        dst.push(CANONICAL_HULL[canonIdx]); // canonical coords
-      }
-      // Compute homography canonical → image (so we can transform canonical
-      // sampling points to image coords for sampling).
-      const H = computeHomography(dst, src);
-      if (!H) continue;
-      // Score: project each canonical point through H and measure residual
-      let residual = 0;
-      for (let i = 0; i < 5; i++) {
-        const proj = applyHomography(H, dst[i]);
-        residual += Math.hypot(proj[0] - src[i][0], proj[1] - src[i][1]);
-      }
-      // Also score: sample brightness along each triangle's 3 edges. The
-      // edges SHOULD be dark (low value). Penalize alignments where edges
-      // aren't dark.
-      let edgeDarkness = 0;
-      for (const tri of SMC_TRIANGLES) {
-        const A = applyHomography(H, tri.A);
-        const B = applyHomography(H, tri.B);
-        const C = applyHomography(H, tri.C);
-        edgeDarkness += sampleLineMean(gray, w, h, A, B, 0.15, 8);
-        edgeDarkness += sampleLineMean(gray, w, h, B, C, 0.15, 8);
-        edgeDarkness += sampleLineMean(gray, w, h, C, A, 0.15, 8);
-      }
-      // Combined score (lower is better)
-      const score = residual + edgeDarkness * 0.05;
-      candidates.push({ H, score, residual, edgeDarkness, mirror, rot });
-    }
-  }
-  candidates.sort((a, b) => a.score - b.score);
-  return candidates;
-}
-
-// ----------------------------------------------------------------------------
-// Decode the 3 triangles given a homography H (canonical → image) and a
-// grayscale image. Returns { states: [s1,s2,s3], code, lineSamples, confidence } or null.
-// confidence: sum of decision margins — higher = more decisive decode.
-// ----------------------------------------------------------------------------
-function decodeTriangles(H, gray, w, h){
-  const states = [];
-  const lineSamples = [];
-
-  // Edge darkness: sample the 9 triangle outline edges → typical "dark" value
-  let edgeSum = 0, edgeCount = 0;
-  for (const tri of SMC_TRIANGLES) {
-    const A = applyHomography(H, tri.A);
-    const B = applyHomography(H, tri.B);
-    const C = applyHomography(H, tri.C);
-    edgeSum += sampleLineMean(gray, w, h, A, B); edgeCount++;
-    edgeSum += sampleLineMean(gray, w, h, B, C); edgeCount++;
-    edgeSum += sampleLineMean(gray, w, h, C, A); edgeCount++;
-  }
-  const edgeAvg = edgeSum / edgeCount;
-
-  // Background brightness: sample 9 points inside each triangle (a small grid),
-  // take the MAX (brightest) across all samples. The brightest pixel inside
-  // the marker is unlikely to lie on any line, so this gives a reliable "white"
-  // reference even when interior lines happen to pass through the centroid.
-  let bgMax = 0;
-  for (const tri of SMC_TRIANGLES) {
-    // Barycentric grid: avoid edges (inset 0.2) and centroid (where lines often cross).
-    const samples = [
-      [0.6, 0.2, 0.2], [0.2, 0.6, 0.2], [0.2, 0.2, 0.6],
-      [0.5, 0.3, 0.2], [0.3, 0.5, 0.2], [0.2, 0.5, 0.3],
-      [0.5, 0.2, 0.3], [0.3, 0.2, 0.5], [0.2, 0.3, 0.5],
-    ];
-    for (const [a, b, c] of samples) {
-      const cx = a * tri.A[0] + b * tri.B[0] + c * tri.C[0];
-      const cy = a * tri.A[1] + b * tri.B[1] + c * tri.C[1];
-      const p = applyHomography(H, [cx, cy]);
-      const ix = Math.round(p[0]), iy = Math.round(p[1]);
-      if (ix < 1 || ix >= w-1 || iy < 1 || iy >= h-1) continue;
-      // Use the local max of a 3x3 neighborhood (brightest pixel = clearest of any stroke)
-      let localMax = 0;
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const v = gray[(iy+dy) * w + (ix+dx)];
-          if (v > localMax) localMax = v;
-        }
-      }
-      if (localMax > bgMax) bgMax = localMax;
-    }
-  }
-  const bgAvg = bgMax > 0 ? bgMax : 255;
-
-  // Threshold midway between edge-dark and bg-light. Safety floor of 32 so we
-  // don't end up with a near-zero threshold from pathological inputs.
-  const lineThreshold = Math.max(32, (edgeAvg + bgAvg) / 2);
-
-  let totalConfidence = 0;
-  for (let t = 0; t < SMC_TRIANGLES.length; t++) {
-    const pts = trianglePoints(SMC_TRIANGLES[t]);
-    const present = [];
-    const triSamples = [];
-    for (let i = 0; i < MARKER_LINES.length; i++) {
-      const ln = MARKER_LINES[i];
-      const p1c = pts[ln[0].toUpperCase()];
-      const p2c = pts[ln[1].toUpperCase()];
-      const p1 = applyHomography(H, p1c);
-      const p2 = applyHomography(H, p2c);
-      const mean = sampleLineMean(gray, w, h, p1, p2);
-      const isPresent = mean < lineThreshold;
-      triSamples.push({ line: ln, idx: i, mean, present: isPresent });
-      totalConfidence += Math.abs(mean - lineThreshold);
-      if (isPresent) present.push(i);
-    }
-    // Enforce the 0..3 limit: if more than 3 detected, keep the 3 darkest
-    if (present.length > 3) {
-      triSamples.sort((a, b) => a.mean - b.mean);
-      present.length = 0;
-      for (let i = 0; i < 3; i++) present.push(triSamples[i].idx);
-      // Restore order for lineSamples
-      triSamples.sort((a, b) => a.idx - b.idx);
-    }
-    const key = present.slice().sort((a, b) => a - b).join(",");
-    const state = MARKER_SUBSET_LOOKUP.get(key);
-    if (state === undefined) return null;
-    states.push(state);
-    lineSamples.push(triSamples);
-  }
-  return {
-    states,
-    code: markerStatesToCode(states),
-    lineSamples,
-    lineThreshold,
-    edgeAvg,
-    bgAvg,
-    confidence: totalConfidence,
-  };
-}
-
-// ----------------------------------------------------------------------------
-// Main entry: run the pipeline with several preprocessing variants and return
-// the TOP candidates ranked by decode confidence. The caller (which knows about
-// the parts database) picks whichever candidate matches a known part — this
-// resolves the unavoidable mirror ambiguity (the marker pentagon is left-right
-// symmetric, so two distinct codes can produce equally good geometric fits).
-// Returns { candidates: [{code, states, confidence, alignmentScore, ...}], debug }.
-// ----------------------------------------------------------------------------
-function decodeMarkerFromImageData(imageData){
-  const { data, width: w, height: h } = imageData;
-  const gray = imageDataToGrayscale(data, w, h);
-
-  const variants = [
-    { window: Math.max(15, Math.round(Math.min(w, h) * 0.04)) | 1, k: 0.92, dilate: 0 }, // paper, high contrast
-    { window: Math.max(31, Math.round(Math.min(w, h) * 0.08)) | 1, k: 0.97, dilate: 1 }, // engraved, low contrast
-    { window: Math.max(15, Math.round(Math.min(w, h) * 0.04)) | 1, k: 0.85, dilate: 0 }, // strong paper threshold
-    { window: Math.max(41, Math.round(Math.min(w, h) * 0.12)) | 1, k: 0.99, dilate: 2 }, // very low contrast stone
-    { window: Math.max(21, Math.round(Math.min(w, h) * 0.05)) | 1, k: 0.95, dilate: 1 }, // medium contrast
-  ];
-
-  const allCandidates = [];
-  for (const v of variants) {
-    let binary = adaptiveThreshold(gray, w, h, v.window, v.k);
-    if (v.dilate > 0) binary = dilate(binary, w, h, v.dilate);
-    const comps = findConnectedComponents(binary, w, h, Math.round(w * h * 0.001));
-    if (comps.length === 0) continue;
-    comps.sort((a, b) => b.area - a.area);
-    for (const comp of comps.slice(0, 5)) {
-      const ar = comp.bbox.width / comp.bbox.height;
-      // Marker canonical aspect is ~2.5. With perspective, this can range
-      // from ~1.2 (looking at marker edge-on) to ~5 (extreme tilt).
-      if (ar < 1.2 || ar > 5) continue;
-      const hull = convexHull(comp.pixels);
-      if (hull.length < 5) continue;
-      const five = selectKCorners(hull, 5);
-      const alignments = tryAlignments(five, gray, w, h);
-      if (alignments.length === 0) continue;
-      // Edge darkness filter — only consider alignments where the canonical
-      // triangle edges map onto actually-dark pixels in the image. Relaxed
-      // threshold (per-edge avg) accommodates perspective distortion.
-      const edgeCutoffPerEdge = 600;
-      for (const align of alignments) {
-        if (align.edgeDarkness / 9 > edgeCutoffPerEdge) continue;
-        const decoded = decodeTriangles(align.H, gray, w, h);
-        if (!decoded) continue;
-        allCandidates.push({
-          code: decoded.code,
-          states: decoded.states,
-          confidence: decoded.confidence,
-          alignmentScore: align.score,
-          edgeDarkness: align.edgeDarkness,
-          residual: align.residual,
-          mirror: align.mirror,
-          decoded,
-          variant: v,
-          five,
-          componentBBox: comp.bbox,
-        });
-      }
-    }
-  }
-  // Deduplicate by code (keep highest-confidence instance) and rank
-  const byCode = new Map();
-  for (const c of allCandidates) {
-    const prev = byCode.get(c.code);
-    if (!prev || c.confidence > prev.confidence) byCode.set(c.code, c);
-  }
-  const ranked = Array.from(byCode.values()).sort((a, b) => b.confidence - a.confidence);
-  return {
-    candidates: ranked,
-    best: ranked[0] || null,
-  };
-}
-
-// ============================================================================
-// MarkerScanner — camera-based tap-to-decode UI.
-// Opens the rear camera, shows a live preview with a marker-shaped guide overlay,
-// captures a single frame on tap, runs the CV pipeline, then returns the best
-// candidate that matches an existing part (or top candidates if no match).
-// ============================================================================
-function MarkerScanner({ parts, onDecoded, onCancel }){
-  const videoRef  = React.useRef(null);
-  const canvasRef = React.useRef(null);
-  const streamRef = React.useRef(null);
-  const [phase, setPhase]     = useState("init");      // init | live | decoding | result | error
-  const [error, setError]     = useState("");
-  const [result, setResult]   = useState(null);        // { match, candidates }
-  const [previewUrl, setPreviewUrl] = useState(null);  // freeze-frame image
-
-  // Set up camera on mount
-  useEffect(()=>{
-    let cancelled = false;
-    async function startCamera(){
-      try {
-        if(!navigator.mediaDevices?.getUserMedia){
-          throw new Error("Camera not supported in this browser.");
-        }
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: "environment" },
-            width:  { ideal: 1280 },
-            height: { ideal: 720 },
-          },
-          audio: false,
-        });
-        if(cancelled){ stream.getTracks().forEach(t=>t.stop()); return; }
-        streamRef.current = stream;
-        if(videoRef.current){
-          videoRef.current.srcObject = stream;
-          // iOS Safari requires the play() to be in the user-gesture chain;
-          // since this fires from a button click (Scan), it's allowed.
-          await videoRef.current.play().catch(()=>{});
-        }
-        setPhase("live");
-      } catch (e) {
-        if(cancelled) return;
-        let msg = "Camera unavailable.";
-        if(e.name === "NotAllowedError")      msg = "Camera permission denied. Please allow camera access and try again.";
-        else if(e.name === "NotFoundError")   msg = "No camera detected on this device.";
-        else if(e.name === "NotReadableError")msg = "Camera is in use by another app.";
-        else if(e.name === "SecurityError")   msg = "Camera requires a secure (HTTPS) connection.";
-        else if(e.message)                    msg = e.message;
-        setError(msg);
-        setPhase("error");
-      }
-    }
-    startCamera();
-    return ()=>{
-      cancelled = true;
-      if(streamRef.current){
-        streamRef.current.getTracks().forEach(t=>t.stop());
-        streamRef.current = null;
-      }
-    };
-  },[]);
-
-  // Capture + decode a single frame
-  function capture(){
-    if(!videoRef.current || !canvasRef.current) return;
-    const video = videoRef.current;
-    const w = video.videoWidth, h = video.videoHeight;
-    if(!w || !h){ setError("Camera not ready yet, please wait a moment."); return; }
-    setPhase("decoding");
-    setError("");
-    // Draw to off-screen canvas
-    const canvas = canvasRef.current;
-    canvas.width  = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    ctx.drawImage(video, 0, 0, w, h);
-    // Capture preview for the result screen
-    setPreviewUrl(canvas.toDataURL("image/jpeg", 0.7));
-
-    // Defer the CV pipeline to next tick so the UI updates first
-    setTimeout(()=>{
-      try {
-        const imageData = ctx.getImageData(0, 0, w, h);
-        const decoded   = decodeMarkerFromImageData(imageData);
-        const candidates = decoded.candidates || [];
-        // Resolve mirror ambiguity by validating against the parts list
-        const knownCodes = new Set((parts||[]).map(p=>p.markerCode).filter(Boolean));
-        let match = null;
-        for(const c of candidates){
-          if(knownCodes.has(c.code)){ match = c; break; }
-        }
-        setResult({ match, candidates });
-        setPhase("result");
-      } catch (e) {
-        setError("Decoding failed: " + (e.message || e));
-        setPhase("result");
-      }
-    }, 30);
-  }
-
-  function retry(){
-    setResult(null);
-    setPreviewUrl(null);
-    setError("");
-    setPhase("live");
-  }
-
-  // Overlay guide: traces the FULL marker outline (3 triangles + baseline extensions).
-  // ViewBox aspect ratio = 2.464 matches the actual marker hull (±15 wide, 12.17 tall).
-  const guideViewBox = "0 0 100 40.58";
-  const guidePath = "M 50.00,0.00 L 60.64,20.80 L 39.36,20.80 L 50.00,0.00 M 90.70,20.80 L 70.75,40.58 L 60.64,20.80 L 90.70,20.80 M 9.30,20.80 L 29.25,40.58 L 39.36,20.80 L 9.30,20.80 M 0.00,20.80 L 9.30,20.80 M 90.70,20.80 L 100.00,20.80";
-
-  return (
-    <div style={{position:"fixed",inset:0,background:"#000",zIndex:3100,display:"flex",
-      flexDirection:"column",overflow:"hidden"}}>
-
-      {/* Top bar */}
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
-        padding:"12px 16px",color:"#fff",background:"rgba(0,0,0,.6)",
-        fontSize:14,letterSpacing:".04em"}}>
-        <span style={{display:"flex",alignItems:"center",gap:8}}>
-          <span style={{fontSize:18}}>📷</span>
-          <span>Scan marker</span>
-        </span>
-        <button onClick={onCancel} style={{
-          background:"transparent",border:"1px solid rgba(255,255,255,.4)",
-          color:"#fff",padding:"4px 12px",borderRadius:6,cursor:"pointer",fontSize:13}}>
-          Cancel
-        </button>
-      </div>
-
-      {/* Camera area */}
-      <div style={{flex:1,position:"relative",overflow:"hidden",background:"#000",
-        display:"flex",alignItems:"center",justifyContent:"center"}}>
-        {phase === "error" && (
-          <div style={{color:"#fff",padding:24,textAlign:"center",maxWidth:420}}>
-            <div style={{fontSize:36,marginBottom:12}}>⚠</div>
-            <div style={{marginBottom:18,lineHeight:1.5}}>{error}</div>
-            <button className="btn btn-primary" onClick={onCancel}>OK</button>
-          </div>
-        )}
-
-        {(phase === "init" || phase === "live" || phase === "decoding") && (
-          <>
-            <video ref={videoRef} playsInline autoPlay muted
-              style={{width:"100%",height:"100%",objectFit:"contain",background:"#000",
-                display: previewUrl ? "none" : "block"}} />
-            {previewUrl && (
-              <img src={previewUrl} alt="" style={{width:"100%",height:"100%",objectFit:"contain",background:"#000"}} />
-            )}
-            {/* Guide overlay — marker pentagon outline */}
-            {phase === "live" && (
-              <svg viewBox={guideViewBox} preserveAspectRatio="xMidYMid meet"
-                style={{position:"absolute",inset:0,width:"100%",height:"100%",
-                  pointerEvents:"none"}}>
-                <path d={guidePath} fill="none" stroke="rgba(255,255,255,.85)"
-                  strokeWidth="1" vectorEffect="non-scaling-stroke"
-                  strokeDasharray="4 3" />
-                <text x="50" y="-1" fill="rgba(255,255,255,.8)" fontSize="2"
-                  textAnchor="middle" style={{fontFamily:"sans-serif"}}>
-                  centre the marker inside the dashed shape
-                </text>
-              </svg>
-            )}
-            {phase === "decoding" && (
-              <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,.45)",
-                display:"flex",alignItems:"center",justifyContent:"center",color:"#fff",
-                fontSize:14}}>
-                Decoding…
-              </div>
-            )}
-          </>
-        )}
-
-        {phase === "result" && result && (
-          <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",
-            alignItems:"center",justifyContent:"center",background:"rgba(0,0,0,.85)",
-            color:"#fff",padding:20,gap:14,overflowY:"auto"}}>
-            {result.match ? (
-              <>
-                <div style={{fontSize:32}}>✓</div>
-                <div style={{fontSize:13,opacity:.7,letterSpacing:".05em"}}>Decoded marker</div>
-                <div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:32,
-                  fontWeight:700,letterSpacing:".15em",color:"var(--accent)"}}>
-                  {result.match.code}
-                </div>
-                <div style={{background:"#fff",borderRadius:8,padding:10}}>
-                  <MarkerSVG code={result.match.code} size={140} />
-                </div>
-                <div style={{display:"flex",gap:10,marginTop:6}}>
-                  <button className="btn btn-ghost" onClick={retry}
-                    style={{background:"rgba(255,255,255,.1)",color:"#fff",
-                      borderColor:"rgba(255,255,255,.3)"}}>
-                    Rescan
-                  </button>
-                  <button className="btn btn-primary" onClick={()=>onDecoded(result.match.code)}>
-                    Use this code
-                  </button>
-                </div>
-              </>
-            ) : result.candidates.length === 0 ? (
-              <>
-                <div style={{fontSize:32}}>×</div>
-                <div style={{fontSize:14,textAlign:"center",lineHeight:1.5,maxWidth:320}}>
-                  Couldn't find a marker in this frame.<br/>
-                  Try better lighting, less glare, or hold the camera steadier.
-                </div>
-                <button className="btn btn-primary" onClick={retry}>Try again</button>
-              </>
-            ) : (
-              <>
-                <div style={{fontSize:32}}>?</div>
-                <div style={{fontSize:14,textAlign:"center",lineHeight:1.5,maxWidth:320}}>
-                  Decoded a marker but no matching part. Possible codes:
-                </div>
-                <div style={{display:"flex",flexDirection:"column",gap:6,width:"100%",maxWidth:280}}>
-                  {result.candidates.slice(0,3).map(c => (
-                    <button key={c.code} onClick={()=>onDecoded(c.code)}
-                      style={{background:"rgba(255,255,255,.1)",border:"1px solid rgba(255,255,255,.3)",
-                        color:"#fff",padding:"10px 14px",borderRadius:6,fontSize:14,
-                        fontFamily:"'JetBrains Mono',monospace",fontWeight:600,letterSpacing:".15em",
-                        cursor:"pointer"}}>
-                      {c.code}
-                    </button>
-                  ))}
-                </div>
-                <button className="btn btn-ghost" onClick={retry}
-                  style={{background:"rgba(255,255,255,.1)",color:"#fff",
-                    borderColor:"rgba(255,255,255,.3)",marginTop:6}}>
-                  Rescan
-                </button>
-              </>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Bottom capture bar */}
-      {phase === "live" && (
-        <div style={{padding:"14px 20px 22px",background:"#000",display:"flex",
-          alignItems:"center",justifyContent:"center",gap:18}}>
-          <button onClick={capture} aria-label="Capture"
-            style={{width:68,height:68,borderRadius:"50%",border:"4px solid #fff",
-              background:"#fff",cursor:"pointer",boxShadow:"0 0 0 2px rgba(0,0,0,.4)"}}>
-            <span style={{display:"block",width:"100%",height:"100%",borderRadius:"50%",
-              background:"#fff"}}/>
-          </button>
-        </div>
-      )}
-
-      {/* Hidden canvas for frame capture */}
-      <canvas ref={canvasRef} style={{display:"none"}} />
-    </div>
-  );
-}
-
-// MarkerSearch — manual code entry modal with optional camera scanner.
-function MarkerSearch({ parts, onFound, onClose }){
-  const [code, setCode]       = useState("");
-  const [error, setError]     = useState("");
-  const [scanning, setScanning] = useState(false);
+// MarkerSearch — manual code entry modal (replaces camera scanner).
+function MarkerSearch({ onFound, onClose }){
+  const [code, setCode]   = useState("");
+  const [error, setError] = useState("");
   const inputRef = React.useRef(null);
 
-  useEffect(()=>{ if(!scanning) inputRef.current?.focus(); },[scanning]);
+  useEffect(()=>{ inputRef.current?.focus(); },[]);
 
   function submit(){
     const c = code.trim().toUpperCase().replace(/[^0-9A-Z]/g,"");
     if(c.length !== 6){ setError("Code must be exactly 6 characters (numbers + letters)."); return; }
     setError("");
     onFound(c);
-  }
-
-  function handleScanned(scannedCode){
-    setScanning(false);
-    setCode(scannedCode);
-    setError("");
-    // Auto-submit if it matches a known part (resolves the typical happy path)
-    if((parts||[]).some(p=>p.markerCode===scannedCode)){
-      onFound(scannedCode);
-    }
-  }
-
-  if(scanning){
-    return <MarkerScanner parts={parts}
-      onDecoded={handleScanned}
-      onCancel={()=>setScanning(false)} />;
   }
 
   return (
@@ -1452,24 +534,8 @@ function MarkerSearch({ parts, onFound, onClose }){
           <h3 style={{margin:0,fontSize:14,letterSpacing:".04em"}}>Find part by marker code</h3>
         </div>
         <p style={{fontSize:12,color:"var(--ink3)",lineHeight:1.55,marginBottom:14}}>
-          Scan the marker with your camera, or type the 6-character code printed on the part's template.
-          Letters and numbers — uppercase only, no I / L / O / U.
+          Enter the 6-character code printed on the part's physical template. Letters and numbers — uppercase only, no I / L / O / U.
         </p>
-
-        <button className="btn btn-ghost" onClick={()=>setScanning(true)}
-          style={{width:"100%",marginBottom:12,display:"flex",alignItems:"center",
-            justifyContent:"center",gap:8,padding:"10px 14px"}}>
-          <span style={{fontSize:18}}>📷</span>
-          <span>Scan with camera</span>
-        </button>
-
-        <div style={{display:"flex",alignItems:"center",gap:10,margin:"8px 0 12px",
-          fontSize:11,color:"var(--ink3)",letterSpacing:".05em"}}>
-          <div style={{flex:1,height:1,background:"var(--paper3)"}}/>
-          <span>OR ENTER MANUALLY</span>
-          <div style={{flex:1,height:1,background:"var(--paper3)"}}/>
-        </div>
-
         <input ref={inputRef} className="input" value={code}
           placeholder="K3F2A9"
           maxLength={8}
@@ -2370,8 +1436,8 @@ function DesignerPage({ stages, projects, subprojects, parts, setParts, partType
                         {part.markerCode}
                       </button>
                       <button
-                        title="Download marker as PNG (for printing template)"
-                        onClick={e=>{ e.stopPropagation(); downloadMarkerPNG(part.markerCode, getPartId(part, projects, subprojects)); }}
+                        title="Download marker as SVG (for printing template)"
+                        onClick={e=>{ e.stopPropagation(); downloadMarkerSVG(part.markerCode, getPartId(part, projects, subprojects)); }}
                         style={{background:"none",border:"none",cursor:"pointer",fontSize:11,padding:"2px",color:"var(--ink3)"}}>
                         ⤓
                       </button>
@@ -3133,7 +2199,7 @@ function WorkshopPage({ stages, projects, subprojects, parts, setParts, material
 
   return (
     <div>
-      {scanning && <MarkerSearch parts={parts} onFound={handleScan} onClose={()=>setScanning(false)} />}
+      {scanning && <MarkerSearch onFound={handleScan} onClose={()=>setScanning(false)} />}
       {qcModal && (() => {
         const part = parts.find(p=>p.id===qcModal.partId);
         if(!part) return null;
@@ -3383,12 +2449,8 @@ function WorkshopPage({ stages, projects, subprojects, parts, setParts, material
                           {getPartId(part,projects,subprojects)}
                         </span>
                         <button className="btn btn-ghost btn-sm" style={{fontSize:10,padding:"3px 8px",marginTop:2}}
-                          onClick={()=>downloadMarkerPNG(part.markerCode, getPartId(part,projects,subprojects))}>
-                          ⤓ Download PNG
-                        </button>
-                        <button className="btn btn-ghost btn-sm" style={{fontSize:10,padding:"3px 8px",marginTop:2}}
-                          onClick={()=>downloadMarkerDXF(part.markerCode, getPartId(part,projects,subprojects))}>
-                          ⤓ Download DXF
+                          onClick={()=>downloadMarkerSVG(part.markerCode, getPartId(part,projects,subprojects))}>
+                          ⤓ Download SVG
                         </button>
                       </>
                     ) : (
